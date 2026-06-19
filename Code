@@ -1,0 +1,589 @@
+import machine
+import test.st7789 as st7789
+import time
+from machine import Pin, ADC
+import random
+from test.fonts import vga2_8x8 as font1
+from test.fonts import vga1_16x32 as font2
+from test import buzzer_music
+from time import sleep
+
+
+# =========================
+# SCREEN SETUP
+# =========================
+
+st7789_res = 0
+st7789_dc = 1
+
+disp_width = 240
+disp_height = 240
+
+spi_sck = machine.Pin(2)
+spi_tx = machine.Pin(3)
+
+spi0 = machine.SPI(
+    0,
+    baudrate=40000000,
+    phase=1,
+    polarity=1,
+    sck=spi_sck,
+    mosi=spi_tx
+)
+
+display = st7789.ST7789(
+    spi0,
+    disp_width,
+    disp_height,
+    reset=machine.Pin(st7789_res, machine.Pin.OUT),
+    dc=machine.Pin(st7789_dc, machine.Pin.OUT),
+    xstart=0,
+    ystart=0,
+    rotation=1
+)
+
+display.fill(st7789.BLACK)
+
+
+# =========================
+# CONTROLS
+# =========================
+
+xAxis = ADC(Pin(28))
+yAxis = ADC(Pin(29))
+
+buttonB = Pin(5, Pin.IN, Pin.PULL_UP)  # Rotate
+buttonA = Pin(6, Pin.IN, Pin.PULL_UP)  # Start
+
+
+# =========================
+# GAME SETTINGS
+# =========================
+
+g = []
+score = 0
+reachtop = False
+cell = 15
+
+box_column = 4
+box_row = 0
+
+# Bigger number = slower normal fall
+NORMAL_DROP_MS = 620
+
+# Smaller number = faster soft drop
+SOFT_DROP_MS = 55
+
+# Smaller number = faster button response
+MOVE_REPEAT_MS = 75
+ROTATE_REPEAT_MS = 130
+
+LOOP_DELAY = 0.012
+
+GHOST_COLOR = 0x7BEF
+ACTIVE_COLOR = 0xFFE0
+LOCKED_COLOR = 0x07EF
+BORDER_COLOR = 0x0010
+PANEL_COLOR = 0x867F
+
+last_move_time = 0
+last_rotate_time = 0
+last_drop_time = 0
+
+song = '0 A#4 1 1;2 F5 1 1;4 D#5 1 1;8 D5 1 1;11 D5 1 1;6 A#4 1 1;14 D#5 1 1;18 A#4 1 1;20 D#5 1 1;22 A#4 1 1;24 D5 1 1;27 D5 1 1;30 D#5 1 1;32 A#4 1 1;34 F5 1 1;36 D#5 1 1;38 A#4 1 1;40 D5 1 1;43 D5 1 1;46 D#5 1 1;50 A#4 1 1;52 D#5 1 1;54 G5 1 1;56 F5 1 1;59 D#5 1 1;62 F5 1 1;64 A#4 1 1;66 F5 1 1;68 D#5 1 1;70 A#4 1 1;72 D5 1 1;75 D5 1 1;78 D#5 1 1;82 A#4 1 1;84 D#5 1 1;86 A#4 1 1;88 D5 1 1;91 D5 1 1;94 D#5 1 1;96 A#4 1 1;100 D#5 1 1;102 A#4 1 1;104 D5 1 1;107 D5 1 1;110 D#5 1 1;114 A#4 1 1;116 D#5 1 1;118 G5 1 1;120 F5 1 1;123 D#5 1 1;126 F5 1 1;98 F5 1 1'
+
+
+# =========================
+# BLOCKS
+# =========================
+
+boxO = [
+    [1, 1],
+    [1, 1]
+]
+
+boxz_1 = [
+    [1, 1, 0],
+    [0, 1, 1],
+    [0, 0, 0]
+]
+
+boxz_2 = [
+    [0, 1, 1],
+    [1, 1, 0],
+    [0, 0, 0]
+]
+
+box7_1 = [
+    [1, 1, 0],
+    [0, 1, 0],
+    [0, 1, 0]
+]
+
+box7_2 = [
+    [0, 1, 1],
+    [0, 1, 0],
+    [0, 1, 0]
+]
+
+boxT = [
+    [0, 1, 0],
+    [1, 1, 1],
+    [0, 0, 0]
+]
+
+boxI = [
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0],
+    [1, 1, 1, 1, 0],
+    [0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0]
+]
+
+boxes = [boxO, boxz_1, boxz_2, box7_1, box7_2, boxT, boxI]
+
+
+# =========================
+# MUSIC
+# =========================
+
+def make_song():
+    try:
+        return buzzer_music.music(song, pins=[Pin(23)])
+    except Exception as e:
+        print("Music error:", e)
+        return None
+
+
+def song_tick(mySong):
+    if mySong is not None:
+        try:
+            mySong.tick()
+        except:
+            pass
+
+
+def song_stop(mySong):
+    if mySong is not None:
+        try:
+            mySong.stop()
+        except:
+            pass
+
+
+# =========================
+# BLOCK LOGIC
+# =========================
+
+def newbox():
+    box_id = random.randint(0, 6)
+    box_org = boxes[box_id]
+
+    b = []
+
+    for i in range(len(box_org)):
+        b.append(box_org[i][:])
+
+    return b
+
+
+box = newbox()
+
+
+def reset_game():
+    global g, score, reachtop, box, box_column, box_row
+    global last_move_time, last_rotate_time, last_drop_time
+
+    g = []
+
+    for i in range(16):
+        g.append([0] * 12)
+
+    score = 0
+    reachtop = False
+
+    box = newbox()
+    box_column = 4
+    box_row = 0
+
+    now = time.ticks_ms()
+
+    last_move_time = now
+    last_rotate_time = now
+    last_drop_time = now
+
+    enter()
+
+
+def clockwise():
+    global box
+
+    N = len(box)
+    a = []
+
+    for i in range(N):
+        a.append(box[i][:])
+
+    for i in range(N):
+        for j in range(N):
+            box[N - j - 1][i] = a[i][j]
+
+
+def counter_clockwise():
+    global box
+
+    N = len(box)
+    a = []
+
+    for i in range(N):
+        a.append(box[i][:])
+
+    for i in range(N):
+        for j in range(N):
+            box[j][N - i - 1] = a[i][j]
+
+
+def leave():
+    global g
+
+    j = box_row
+
+    for r in box:
+        i = box_column
+
+        for d in r:
+            if d == 1:
+                if 0 <= j < 16 and 0 <= i < 12:
+                    g[j][i] = 0
+
+            i += 1
+
+        j += 1
+
+
+def enter():
+    global g
+
+    j = box_row
+
+    for r in box:
+        i = box_column
+
+        for d in r:
+            if d == 1:
+                if 0 <= j < 16 and 0 <= i < 12:
+                    g[j][i] = 1
+
+            i += 1
+
+        j += 1
+
+
+def can_place_at(test_row, test_column):
+    j = test_row
+
+    for r in box:
+        i = test_column
+
+        for d in r:
+            if d == 1:
+                if i < 0 or i >= 12:
+                    return False
+
+                if j < 0 or j >= 16:
+                    return False
+
+                if g[j][i] == 1:
+                    return False
+
+            i += 1
+
+        j += 1
+
+    return True
+
+
+def checkvalid():
+    return can_place_at(box_row, box_column)
+
+
+def turn():
+    leave()
+    clockwise()
+
+    if checkvalid() == False:
+        counter_clockwise()
+
+    enter()
+
+
+def down():
+    global box_row
+
+    leave()
+    box_row += 1
+
+    if checkvalid() == False:
+        box_row -= 1
+
+    enter()
+
+
+def left():
+    global box_column
+
+    leave()
+    box_column -= 1
+
+    if checkvalid() == False:
+        box_column += 1
+
+    enter()
+
+
+def right():
+    global box_column
+
+    leave()
+    box_column += 1
+
+    if checkvalid() == False:
+        box_column -= 1
+
+    enter()
+
+
+def clear():
+    global score, reachtop, g
+
+    i = 0
+    c = 0
+
+    while i < 16:
+        if 0 in g[i]:
+            i += 1
+        else:
+            c += 1
+            del g[i]
+            g.insert(0, [0] * 12)
+
+    if c > 0:
+        score += 10 * (2 ** (c - 1))
+
+        if score > 999:
+            score = 999
+
+    if 1 in g[0]:
+        reachtop = True
+
+
+def autodrop():
+    global box_row, box_column, box
+
+    leave()
+    box_row += 1
+
+    if checkvalid() == False:
+        box_row -= 1
+        enter()
+
+        clear()
+
+        box = newbox()
+        box_column = 4
+        box_row = 0
+
+    enter()
+
+
+def get_ghost_row():
+    ghost = box_row
+
+    while can_place_at(ghost + 1, box_column):
+        ghost += 1
+
+    return ghost
+
+
+# =========================
+# DRAWING
+# =========================
+
+def draw_piece_at(piece, row, column, fill_color, outline_color, ghost_mode):
+    j = row
+
+    for r in piece:
+        i = column
+
+        for d in r:
+            if d == 1:
+                x = i * cell
+                y = j * cell
+
+                if 0 <= i < 12 and 0 <= j < 16:
+                    if ghost_mode:
+                        display.rect(x + 2, y + 2, 11, 11, outline_color)
+                        display.rect(x + 4, y + 4, 7, 7, outline_color)
+                    else:
+                        display.rect(x, y, 15, 15, outline_color)
+                        display.fill_rect(x + 1, y + 1, 13, 13, fill_color)
+
+            i += 1
+
+        j += 1
+
+
+def draw_locked_blocks():
+    y = 0
+
+    for r in g:
+        x = 0
+
+        for d in r:
+            if d == 1:
+                display.rect(x, y, 15, 15, BORDER_COLOR)
+                display.fill_rect(x + 1, y + 1, 13, 13, LOCKED_COLOR)
+
+            x += cell
+
+        y += cell
+
+
+def draw_game_area():
+    display.fill_rect(0, 0, 181, 240, 0x0000)
+
+    leave()
+
+    draw_locked_blocks()
+
+    ghost = get_ghost_row()
+
+    if ghost != box_row:
+        draw_piece_at(box, ghost, box_column, 0x0000, GHOST_COLOR, True)
+
+    enter()
+
+    draw_piece_at(box, box_row, box_column, ACTIVE_COLOR, BORDER_COLOR, False)
+
+
+def draw_side_panel():
+    display.fill_rect(181, 0, 59, 240, 0x0000)
+    display.fill_rect(181, 0, 4, 240, PANEL_COLOR)
+
+    display.text(font1, "Tetris", 185, 25)
+    display.text(font1, "Score", 185, 50)
+    display.text(font2, str(score), 185, 80)
+
+    display.text(font1, "Ghost", 185, 135)
+    display.text(font1, "Assist", 185, 150)
+
+    display.text(font1, "B", 185, 190)
+    display.text(font1, "Rotate", 198, 190)
+
+
+def draw_all():
+    draw_game_area()
+    draw_side_panel()
+
+
+# =========================
+# CONTROLS
+# =========================
+
+def read_soft_drop():
+    yValue = yAxis.read_u16()
+
+    # Joystick DOWN = soft drop.
+    # This is flipped from the old version.
+    if yValue < 20000:
+        return True
+
+    return False
+
+
+def handle_controls():
+    global last_move_time, last_rotate_time
+
+    now = time.ticks_ms()
+    xValue = xAxis.read_u16()
+
+    if buttonB.value() == 0:
+        if time.ticks_diff(now, last_rotate_time) > ROTATE_REPEAT_MS:
+            turn()
+            last_rotate_time = now
+
+    if time.ticks_diff(now, last_move_time) > MOVE_REPEAT_MS:
+        if xValue < 20000:
+            left()
+            last_move_time = now
+
+        elif xValue > 45000:
+            right()
+            last_move_time = now
+
+
+# =========================
+# MAIN GAME
+# =========================
+
+def game():
+    global reachtop, last_drop_time
+
+    mySong = make_song()
+    last_drop_time = time.ticks_ms()
+
+    while True:
+        now = time.ticks_ms()
+
+        song_tick(mySong)
+
+        soft_drop = read_soft_drop()
+
+        handle_controls()
+
+        if soft_drop:
+            drop_delay = SOFT_DROP_MS
+        else:
+            drop_delay = NORMAL_DROP_MS
+
+        if time.ticks_diff(now, last_drop_time) > drop_delay:
+            autodrop()
+            last_drop_time = now
+
+        draw_all()
+
+        if reachtop == True:
+            song_stop(mySong)
+
+            display.fill(0x0000)
+            display.text(font2, " GAME", 45, 60)
+            display.text(font2, " OVER", 45, 130)
+
+            time.sleep(2)
+            return
+
+            sleep(LOOP_DELAY)
+
+
+def Tetris():
+    while True:
+        display.fill(0x0000)
+        display.text(font2, "Press A", 30, 40, color=0x07E0)
+        display.text(font2, "To Start", 30, 80, color=0x07E0)
+
+        while True:
+            if buttonA.value() == 0:
+                print("START")
+                sleep(0.15)
+                reset_game()
+                game()
+                break
+
+            sleep(0.03)
+
+
+# =========================
+# START
+# =========================
+
+Tetris()
